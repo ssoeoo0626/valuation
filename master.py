@@ -768,28 +768,6 @@ if st.sidebar.button("🧹 DART 수집값 초기화"):
 
 st.sidebar.caption("시장 데이터 자동 갱신 주기: 24시간")
 
-
-# -------------------------------------------------
-# 8. 기본 DB 로드
-# -------------------------------------------------
-
-st.sidebar.divider()
-st.sidebar.subheader("🔎 데이터 로드 확인")
-st.sidebar.write("현재 작업 폴더:", str(Path.cwd()))
-st.sidebar.write("읽는 master 경로:", str(Path(PEER_MASTER_PATH).resolve()))
-st.sidebar.write("읽는 financials 경로:", str(Path(FINANCIALS_PATH).resolve()))
-st.sidebar.write("Master row 수:", len(default_peer_df))
-st.sidebar.write("Financials row 수:", len(default_financial_df))
-
-with st.sidebar.expander("현재 로드된 Master 확인"):
-    if default_peer_df.empty:
-        st.write("로드된 master가 없습니다.")
-    else:
-        st.dataframe(
-            default_peer_df[["Ticker", "Company", "Peer Group", "Category"]],
-            use_container_width=True
-        )
-
 # -------------------------------------------------
 # 9. DART 자동 수집
 # -------------------------------------------------
