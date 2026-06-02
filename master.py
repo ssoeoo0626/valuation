@@ -57,7 +57,7 @@ except Exception:
 
 
 # -------------------------------------------------
-# 2. 공통 정리 함수
+# 2. 공통 함수
 # -------------------------------------------------
 
 def get_file_mtime(path):
@@ -67,37 +67,42 @@ def get_file_mtime(path):
     return None
 
 
+def read_csv_safely(path, required_cols, file_label):
+    file_path = Path(path)
+
+    if not file_path.exists():
+        return pd.DataFrame(columns=required_cols)
+
+    try:
+        return pd.read_csv(file_path, encoding="utf-8-sig")
+    except pd.errors.ParserError:
+        st.error(f"{file_label} CSV 형식이 깨져 있습니다.")
+        st.caption(f"현재 앱이 읽는 경로: {file_path.resolve()}")
+        st.caption("대부분 특정 줄의 콤마 개수가 맞지 않거나, 코드블록 표시(```csv)가 같이 저장된 경우입니다.")
+        return pd.DataFrame(columns=required_cols)
+    except Exception as e:
+        st.error(f"{file_label} 파일을 읽는 중 오류가 발생했습니다: {e}")
+        st.caption(f"현재 앱이 읽는 경로: {file_path.resolve()}")
+        return pd.DataFrame(columns=required_cols)
+
+
 def is_korea_ticker_series(ticker_series):
     ticker_series = ticker_series.fillna("").astype(str).str.strip()
     return ticker_series.str.endswith(".KQ") | ticker_series.str.endswith(".KS")
 
 
 def normalize_peer_master(df):
-    """
-    peer_master.csv 정리 함수
-
-    - master에 입력한 Peer Group / Category 값을 그대로 사용
-    - 컬럼명만 표준화
-    - 국내 티커(.KS/.KQ)도 Category를 강제로 덮어쓰지 않음
-    - 단, 국내 티커인데 값이 비어 있으면 기본값만 채움
-    """
-
     df = df.copy()
 
     rename_map = {
         "ticker": "Ticker",
-        "Ticker": "Ticker",
         "company": "Company",
-        "Company": "Company",
         "Peer_Group": "Peer Group",
         "peer_group": "Peer Group",
         "peer group": "Peer Group",
         "Peer group": "Peer Group",
-        "Peer Group": "Peer Group",
         "country": "Country",
-        "Country": "Country",
         "category": "Category",
-        "Category": "Category",
     }
 
     df = df.rename(columns={col: rename_map.get(col, col) for col in df.columns})
@@ -111,6 +116,7 @@ def normalize_peer_master(df):
 
     is_korea = is_korea_ticker_series(df["Ticker"])
 
+    # master 값은 유지. 비어 있을 때만 보정.
     df.loc[is_korea & (df["Country"] == ""), "Country"] = "Korea"
     df.loc[is_korea & (df["Peer Group"] == ""), "Peer Group"] = "CG/VFX"
     df.loc[is_korea & (df["Category"] == ""), "Category"] = "Domestic Peer"
@@ -121,32 +127,18 @@ def normalize_peer_master(df):
 
 
 def normalize_financials(df):
-    """
-    financials.csv 정리 함수
-
-    필요한 컬럼:
-    Ticker, Period, Revenue_M, EBITDA_M, Net Income_M, Net Debt_M, Shares_M
-    """
-
     df = df.copy()
 
     rename_map = {
         "ticker": "Ticker",
-        "Ticker": "Ticker",
         "period": "Period",
-        "Period": "Period",
         "Revenue": "Revenue_M",
-        "Revenue_M": "Revenue_M",
         "EBITDA": "EBITDA_M",
-        "EBITDA_M": "EBITDA_M",
         "Net Income": "Net Income_M",
-        "Net Income_M": "Net Income_M",
         "Net_Income_M": "Net Income_M",
         "Net Debt": "Net Debt_M",
-        "Net Debt_M": "Net Debt_M",
         "Net_Debt_M": "Net Debt_M",
         "Shares": "Shares_M",
-        "Shares_M": "Shares_M",
     }
 
     df = df.rename(columns={col: rename_map.get(col, col) for col in df.columns})
@@ -182,31 +174,28 @@ def get_korea_peer_df(peer_df):
     return peer_df[is_korea_ticker_series(peer_df["Ticker"])].copy()
 
 
-def get_non_korea_peer_df(peer_df):
-    peer_df = normalize_peer_master(peer_df)
-    return peer_df[~is_korea_ticker_series(peer_df["Ticker"])].copy()
-
-
 # -------------------------------------------------
-# 3. 기본 CSV 로드
+# 3. CSV 로드
 # -------------------------------------------------
 
 @st.cache_data
 def load_peer_master(file_mtime=None):
-    try:
-        peer_df = pd.read_csv(PEER_MASTER_PATH)
-    except FileNotFoundError:
-        peer_df = pd.DataFrame(columns=REQUIRED_PEER_COLS)
+    peer_df = read_csv_safely(
+        PEER_MASTER_PATH,
+        REQUIRED_PEER_COLS,
+        "peer_master.csv"
+    )
 
     return normalize_peer_master(peer_df)
 
 
 @st.cache_data
 def load_financials(file_mtime=None):
-    try:
-        financial_df = pd.read_csv(FINANCIALS_PATH)
-    except FileNotFoundError:
-        financial_df = pd.DataFrame(columns=REQUIRED_FINANCIAL_COLS)
+    financial_df = read_csv_safely(
+        FINANCIALS_PATH,
+        REQUIRED_FINANCIAL_COLS,
+        "financials.csv"
+    )
 
     return normalize_financials(financial_df)
 
@@ -382,49 +371,21 @@ def safe_zero(value):
 
 
 def calculate_dart_metrics(fs_df):
-    """
-    DART 원 단위 → 백만원 단위 변환
-
-    Revenue_M = 연결 매출액
-    EBITDA_M = 영업이익 + 감가상각비 + 무형자산상각비
-    Net Income_M = 연결 당기순이익
-    Net Debt_M = 이자부부채 - 현금및현금성자산
-
-    주의:
-    - DART 계정명은 회사마다 달라 일부 항목은 수동 검증 필요
-    - 현재 Net Debt에는 리스부채 포함
-    """
-
     revenue = pick_amount(
         fs_df,
-        [
-            "매출액",
-            "수익(매출액)",
-            "영업수익",
-            "수익",
-            "매출"
-        ],
+        ["매출액", "수익(매출액)", "영업수익", "수익", "매출"],
         sj_div=["IS", "CIS"]
     )
 
     operating_income = pick_amount(
         fs_df,
-        [
-            "영업이익",
-            "영업손실"
-        ],
+        ["영업이익", "영업손실"],
         sj_div=["IS", "CIS"]
     )
 
     net_income = pick_amount(
         fs_df,
-        [
-            "당기순이익",
-            "당기순손실",
-            "당기순손익",
-            "연결당기순이익",
-            "연결당기순손실"
-        ],
+        ["당기순이익", "당기순손실", "당기순손익", "연결당기순이익", "연결당기순손실"],
         sj_div=["IS", "CIS"]
     )
 
@@ -440,71 +401,32 @@ def calculate_dart_metrics(fs_df):
     )
 
     if pd.isna(depreciation_amortization):
-        depreciation = pick_amount(
-            fs_df,
-            ["감가상각비"],
-            sj_div="CF"
-        )
-
-        amortization = pick_amount(
-            fs_df,
-            ["무형자산상각비"],
-            sj_div="CF"
-        )
-
+        depreciation = pick_amount(fs_df, ["감가상각비"], sj_div="CF")
+        amortization = pick_amount(fs_df, ["무형자산상각비"], sj_div="CF")
         depreciation_amortization = safe_zero(depreciation) + safe_zero(amortization)
 
-    cash = pick_amount(
-        fs_df,
-        ["현금및현금성자산"],
-        sj_div="BS"
-    )
+    cash = pick_amount(fs_df, ["현금및현금성자산"], sj_div="BS")
 
-    short_borrowings = pick_amount(
-        fs_df,
-        ["단기차입금"],
-        sj_div="BS"
-    )
+    short_borrowings = pick_amount(fs_df, ["단기차입금"], sj_div="BS")
 
     current_long_debt = pick_amount(
         fs_df,
-        [
-            "유동성장기부채",
-            "유동성장기차입금",
-            "유동성 장기차입금",
-            "유동성사채"
-        ],
+        ["유동성장기부채", "유동성장기차입금", "유동성 장기차입금", "유동성사채"],
         sj_div="BS"
     )
 
-    long_borrowings = pick_amount(
-        fs_df,
-        ["장기차입금"],
-        sj_div="BS"
-    )
-
-    bonds = pick_amount(
-        fs_df,
-        ["사채"],
-        sj_div="BS"
-    )
+    long_borrowings = pick_amount(fs_df, ["장기차입금"], sj_div="BS")
+    bonds = pick_amount(fs_df, ["사채"], sj_div="BS")
 
     current_lease = pick_amount(
         fs_df,
-        [
-            "유동리스부채",
-            "유동성리스부채",
-            "유동성 리스부채"
-        ],
+        ["유동리스부채", "유동성리스부채", "유동성 리스부채"],
         sj_div="BS"
     )
 
     noncurrent_lease = pick_amount(
         fs_df,
-        [
-            "비유동리스부채",
-            "비유동 리스부채"
-        ],
+        ["비유동리스부채", "비유동 리스부채"],
         sj_div="BS"
     )
 
@@ -533,27 +455,11 @@ def calculate_dart_metrics(fs_df):
 
 
 def fetch_dart_financials_for_korea_peers(peer_df, api_key, bsns_year="2025"):
-    """
-    DART는 국내 .KS / .KQ 티커만 수집.
-    해외 Peer는 SKIP 로그로 남김.
-    """
-
     corp_df = get_dart_corp_code(api_key)
-
-    peer_df = normalize_peer_master(peer_df)
     korea_df = get_korea_peer_df(peer_df)
-    non_korea_df = get_non_korea_peer_df(peer_df)
 
     rows = []
     logs = []
-
-    for _, row in non_korea_df.iterrows():
-        logs.append({
-            "Ticker": row["Ticker"],
-            "Company": row.get("Company", ""),
-            "Status": "SKIP",
-            "Message": "DART 제외: 해외/비국내 티커. 재무값은 financials.csv에 입력 필요"
-        })
 
     for _, row in korea_df.iterrows():
         ticker = row["Ticker"]
@@ -613,16 +519,6 @@ def fetch_dart_financials_for_korea_peers(peer_df, api_key, bsns_year="2025"):
 # -------------------------------------------------
 
 def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
-    """
-    Peer + Financials + Market Data 병합
-
-    개선점:
-    - selected_period가 정확히 맞는 financials를 우선 사용
-    - 해당 period가 없는 ticker는 같은 ticker의 최신/마지막 financials로 fallback
-    - financials merge 여부를 Financial Match 컬럼으로 표시
-    - Net Debt가 없으면 EV는 비워두되, 원인 확인 가능
-    """
-
     peer_df = peer_df.copy()
     financial_df = financial_df.copy()
     market_df = market_df.copy()
@@ -632,7 +528,6 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     financial_df["Period"] = financial_df["Period"].astype(str).str.strip()
     market_df["Ticker"] = market_df["Ticker"].astype(str).str.strip()
 
-    # 1) 선택 period financials
     selected_financial = financial_df[
         financial_df["Period"] == selected_period
     ].copy()
@@ -640,7 +535,6 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     selected_financial["Financial Match"] = "Selected Period"
     selected_financial["Financial Period Used"] = selected_financial["Period"]
 
-    # 2) fallback financials: 선택 period가 없는 ticker는 financials.csv의 마지막 값 사용
     fallback_financial = (
         financial_df
         .sort_values(["Ticker", "Period"])
@@ -669,19 +563,15 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     df = peer_df.merge(financial_period, on="Ticker", how="left")
     df = df.merge(market_df, on="Ticker", how="left")
 
-    # financials가 아예 안 붙은 경우 표시
     df["Financial Match"] = df["Financial Match"].fillna("No Financials")
     df["Financial Period Used"] = df["Financial Period Used"].fillna("")
 
-    # 필요한 숫자 컬럼 방어
     for col in ["Market Cap", "Revenue_M", "EBITDA_M", "Net Income_M", "Net Debt_M"]:
         if col not in df.columns:
             df[col] = np.nan
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["Market Cap_M"] = df["Market Cap"] / 1_000_000
-
-    # Net Debt가 있어야 EV 계산
     df["EV_M"] = df["Market Cap_M"] + df["Net Debt_M"]
 
     df["EV/Revenue"] = df["EV_M"] / df["Revenue_M"]
@@ -743,7 +633,7 @@ if DART_API_KEY:
 else:
     st.sidebar.warning("DART API Key 미연결")
 
-if st.sidebar.button("🔄 시장 데이터 강제 새로고침"):
+if st.sidebar.button("🔄 시장 데이터 새로고침"):
     get_market_data.clear()
     st.sidebar.success("시장 데이터 캐시를 초기화했습니다.")
     st.rerun()
@@ -751,25 +641,38 @@ if st.sidebar.button("🔄 시장 데이터 강제 새로고침"):
 if st.sidebar.button("🔄 Master / Financials 새로고침"):
     load_peer_master.clear()
     load_financials.clear()
-
     st.session_state.pop("dart_financials_df", None)
     st.session_state.pop("dart_logs_df", None)
-    st.session_state.pop("dart_valuation_df", None)
-
     st.sidebar.success("Master / Financials 캐시를 초기화했습니다.")
     st.rerun()
 
-if st.sidebar.button("🧹 DART 수집값 초기화"):
-    st.session_state.pop("dart_financials_df", None)
-    st.session_state.pop("dart_logs_df", None)
-    st.session_state.pop("dart_valuation_df", None)
-    st.sidebar.success("DART 수집값을 초기화했습니다.")
-    st.rerun()
-
-st.sidebar.caption("시장 데이터 자동 갱신 주기: 24시간")
 
 # -------------------------------------------------
-# 9. DART 자동 수집
+# 8. 기본 DB 로드
+# -------------------------------------------------
+
+peer_master_mtime = get_file_mtime(PEER_MASTER_PATH)
+financials_mtime = get_file_mtime(FINANCIALS_PATH)
+
+default_peer_df = load_peer_master(peer_master_mtime)
+default_financial_df = load_financials(financials_mtime)
+
+if default_peer_df.empty:
+    st.error("data/peer_master.csv 파일이 없거나 비어 있습니다.")
+    st.stop()
+
+if default_financial_df.empty:
+    st.warning("data/financials.csv 파일이 없거나 비어 있습니다. 해외 Peer의 Net Debt / EV 계산은 financials.csv 입력 후 가능합니다.")
+
+missing_peer_cols = set(REQUIRED_PEER_COLS) - set(default_peer_df.columns)
+
+if missing_peer_cols:
+    st.error(f"peer_master.csv에 필요한 컬럼이 없습니다: {missing_peer_cols}")
+    st.stop()
+
+
+# -------------------------------------------------
+# 9. DART 재무데이터 수집
 # -------------------------------------------------
 
 st.subheader("0. DART 재무데이터 수집")
@@ -797,96 +700,14 @@ if fetch_dart:
             st.session_state["dart_financials_df"] = dart_financials_df
             st.session_state["dart_logs_df"] = dart_logs_df
 
-            # 예전 DART valuation 결과가 남아 있으면 제거
-            st.session_state.pop("dart_valuation_df", None)
-
             st.success("DART 재무데이터 수집 완료. 아래 Valuation 계산에 반영됩니다.")
 
-# -------------------------------------------------
-# 10. Peer / Financials 입력
-# -------------------------------------------------
-
-st.subheader("1. Peer / Financials 입력")
-
-tab1, tab2, tab3 = st.tabs(["기본 Peer DB", "현재 반영 Financials", "추가 입력"])
-
-with tab1:
-    st.dataframe(default_peer_df, use_container_width=True)
-
-with tab2:
-    financial_preview_list = []
-
-    if not default_financial_df.empty:
-        financial_preview_list.append(default_financial_df)
-
-    if "dart_financials_df" in st.session_state and not st.session_state["dart_financials_df"].empty:
-        financial_preview_list.append(st.session_state["dart_financials_df"])
-
-    if len(financial_preview_list) > 0:
-        preview_financial_df = pd.concat(financial_preview_list, ignore_index=True)
-        preview_financial_df = normalize_financials(preview_financial_df)
-        preview_financial_df = preview_financial_df.drop_duplicates(
-            subset=["Ticker", "Period"],
-            keep="last"
-        )
-
-        st.dataframe(preview_financial_df, use_container_width=True)
-    else:
-        st.warning("현재 반영된 Financials 데이터가 없습니다. DART 재무데이터를 먼저 가져오거나 financials.csv를 입력해주세요.")
-
-with tab3:
-    st.caption("이번 분석에만 추가할 Peer가 있으면 여기에 입력하면 됩니다.")
-
-    extra_peer_template = pd.DataFrame({
-        "Ticker": [""],
-        "Company": [""],
-        "Peer Group": [""],
-        "Country": [""],
-        "Category": [""]
-    })
-
-    extra_financial_template = pd.DataFrame({
-        "Ticker": [""],
-        "Period": ["FY2025"],
-        "Revenue_M": [0.0],
-        "EBITDA_M": [0.0],
-        "Net Income_M": [0.0],
-        "Net Debt_M": [0.0],
-        "Shares_M": [0.0]
-    })
-
-    st.write("추가 Peer 입력")
-    extra_peer_df = st.data_editor(
-        extra_peer_template,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="extra_peer_editor"
-    )
-
-    st.write("추가 Financials 입력")
-    extra_financial_df = st.data_editor(
-        extra_financial_template,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="extra_financial_editor"
-    )
-
 
 # -------------------------------------------------
-# 11. 데이터 통합
+# 10. 데이터 통합
 # -------------------------------------------------
 
-extra_peer_df = extra_peer_df[
-    extra_peer_df["Ticker"].astype(str).str.strip() != ""
-].copy()
-
-extra_financial_df = extra_financial_df[
-    extra_financial_df["Ticker"].astype(str).str.strip() != ""
-].copy()
-
-peer_df = pd.concat([default_peer_df, extra_peer_df], ignore_index=True)
-peer_df = normalize_peer_master(peer_df)
-peer_df = peer_df.drop_duplicates(subset=["Ticker"], keep="last")
+peer_df = default_peer_df.copy()
 
 financial_sources = []
 
@@ -896,30 +717,30 @@ if not default_financial_df.empty:
 if "dart_financials_df" in st.session_state and not st.session_state["dart_financials_df"].empty:
     financial_sources.append(st.session_state["dart_financials_df"])
 
-if not extra_financial_df.empty:
-    financial_sources.append(extra_financial_df)
-
 if len(financial_sources) > 0:
     financial_df = pd.concat(financial_sources, ignore_index=True)
 else:
     financial_df = pd.DataFrame(columns=REQUIRED_FINANCIAL_COLS)
+
+peer_df = normalize_peer_master(peer_df)
+peer_df = peer_df.drop_duplicates(subset=["Ticker"], keep="last")
 
 financial_df = normalize_financials(financial_df)
 financial_df = financial_df.drop_duplicates(subset=["Ticker", "Period"], keep="last")
 
 
 # -------------------------------------------------
-# 12. Valuation 설정
+# 11. Valuation 설정
 # -------------------------------------------------
 
-st.subheader("2. Valuation 설정")
+st.subheader("1. Valuation 설정")
 
 available_periods = sorted(financial_df["Period"].dropna().unique())
 available_categories = sorted(peer_df["Category"].dropna().unique())
 available_peer_groups = sorted(peer_df["Peer Group"].dropna().unique())
 
 if len(available_periods) == 0:
-    st.warning("아직 Financials 데이터가 없습니다. 위에서 DART 재무데이터를 먼저 가져오거나 financials.csv를 입력해주세요.")
+    st.warning("아직 Financials 데이터가 없습니다. DART 재무데이터를 가져오거나 financials.csv를 입력해주세요.")
     st.stop()
 
 col1, col2, col3 = st.columns(3)
@@ -974,10 +795,10 @@ valuation_df = calculate_peer_valuation(
 
 
 # -------------------------------------------------
-# 13. Peer Valuation Table
+# 12. Peer Valuation Table
 # -------------------------------------------------
 
-st.subheader("3. Peer Valuation Table")
+st.subheader("2. Peer Valuation Table")
 
 display_cols = [
     "Ticker",
@@ -1014,10 +835,10 @@ st.dataframe(
 
 
 # -------------------------------------------------
-# 14. Peer Multiple Summary
+# 13. Peer Multiple Summary
 # -------------------------------------------------
 
-st.subheader("4. Peer Multiple Summary")
+st.subheader("3. Peer Multiple Summary")
 
 summary_option_col1, summary_option_col2 = st.columns(2)
 
@@ -1065,10 +886,10 @@ with st.expander("Multiple 산정 대상 Peer 보기"):
 
 
 # -------------------------------------------------
-# 15. Target Company Valuation
+# 14. Target Company Valuation
 # -------------------------------------------------
 
-st.subheader("5. Target Company Valuation")
+st.subheader("4. Target Company Valuation")
 
 target_col1, target_col2, target_col3 = st.columns(3)
 
@@ -1120,10 +941,10 @@ result_col3.metric("Implied Value", f"{target_value:,.1f}M")
 
 
 # -------------------------------------------------
-# 16. Sensitivity Table
+# 15. Sensitivity Table
 # -------------------------------------------------
 
-st.subheader("6. Sensitivity Table")
+st.subheader("5. Sensitivity Table")
 
 sensitivity_col1, sensitivity_col2 = st.columns(2)
 
@@ -1160,10 +981,10 @@ st.dataframe(
 
 
 # -------------------------------------------------
-# 17. Export
+# 16. Export
 # -------------------------------------------------
 
-st.subheader("7. Export")
+st.subheader("6. Export")
 
 csv = valuation_df.to_csv(index=False).encode("utf-8-sig")
 
