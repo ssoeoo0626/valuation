@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("📊 Peer Valuation Tool")
-st.caption("기본 Peer DB + DART 재무데이터 자동 반영 + 시장데이터 갱신 + Peer Valuation")
+st.caption("DART 재무데이터 + yfinance 시장데이터 기반 Peer Valuation 자동 산출")
 
 
 # -------------------------------------------------
@@ -238,6 +238,12 @@ def safe_zero(value):
 
 
 def calculate_dart_metrics(fs_df):
+    """
+    DART 원 단위 → 백만원 단위 1자리 변환
+    EBITDA = 영업이익 + 감가상각비 + 무형자산상각비
+    Net Debt = 이자부부채 - 현금및현금성자산
+    """
+
     revenue = pick_amount(
         fs_df,
         ["매출액", "수익(매출액)", "영업수익"],
@@ -256,7 +262,6 @@ def calculate_dart_metrics(fs_df):
         sj_div="IS"
     )
 
-    # 감가상각비+무형자산상각비 통합 계정이 있으면 우선 사용
     depreciation_amortization = pick_amount(
         fs_df,
         [
@@ -458,10 +463,9 @@ if st.sidebar.button("🔄 시장 데이터 강제 새로고침"):
     st.sidebar.success("시장 데이터 캐시를 초기화했습니다.")
 
 if st.sidebar.button("🧹 DART 수집값 초기화"):
-    if "dart_financials_df" in st.session_state:
-        del st.session_state["dart_financials_df"]
-    if "dart_logs_df" in st.session_state:
-        del st.session_state["dart_logs_df"]
+    st.session_state.pop("dart_financials_df", None)
+    st.session_state.pop("dart_logs_df", None)
+    st.session_state.pop("dart_valuation_df", None)
     st.sidebar.success("DART 수집값을 초기화했습니다.")
 
 st.sidebar.caption("시장 데이터 자동 갱신 주기: 24시간")
@@ -487,70 +491,100 @@ if missing_peer_cols:
 
 
 # -------------------------------------------------
-# 8. DART 자동 수집
+# 8. DART 자동 수집 + 즉시 Valuation 산출
 # -------------------------------------------------
 
-st.subheader("0. DART 국내 Peer 재무데이터 자동 수집")
+st.subheader("0. DART 국내 Peer 재무데이터 / Multiple 자동 산출")
 
 with st.expander("DART 수집 설정 / 실행", expanded=True):
     dart_year = st.text_input("사업연도", value="2025")
 
     st.caption(
-        "국내 상장 Peer(.KQ / .KS)의 연결 재무제표를 DART에서 수집합니다. "
-        "수집 후 바로 아래 Valuation 계산에 반영됩니다."
+        "국내 상장 Peer(.KQ / .KS)의 연결 재무제표를 DART에서 수집하고, "
+        "yfinance 시총을 결합해 EV/Revenue, EV/EBITDA, P/E까지 바로 계산합니다."
     )
 
-    fetch_col1, fetch_col2 = st.columns([1, 3])
-
-    with fetch_col1:
-        fetch_dart = st.button("📥 DART 재무데이터 가져오기", type="primary")
-
-    with fetch_col2:
-        if "dart_financials_df" in st.session_state:
-            st.success("DART 수집값이 현재 앱 계산에 반영 중입니다.")
-        else:
-            st.info("아직 DART 수집값이 없습니다. 버튼을 누르면 바로 계산에 반영됩니다.")
+    fetch_dart = st.button("📥 DART 재무데이터 + Multiple 가져오기", type="primary")
 
     if fetch_dart:
         if DART_API_KEY is None:
             st.error("DART API Key가 없습니다. Streamlit Secrets에 DART_API_KEY를 먼저 등록해주세요.")
         else:
-            with st.spinner("DART에서 재무데이터를 수집하는 중입니다..."):
+            with st.spinner("DART 재무데이터와 시장데이터를 수집하는 중입니다..."):
                 dart_financials_df, dart_logs_df = fetch_dart_financials_for_korea_peers(
                     default_peer_df,
                     DART_API_KEY,
                     bsns_year=dart_year
                 )
 
+                korea_peer_df = default_peer_df[
+                    default_peer_df["Ticker"].astype(str).str.endswith(".KQ")
+                    | default_peer_df["Ticker"].astype(str).str.endswith(".KS")
+                ].copy()
+
+                korea_tickers = korea_peer_df["Ticker"].dropna().unique().tolist()
+                korea_market_df = get_market_data(korea_tickers)
+
+                dart_valuation_df = calculate_peer_valuation(
+                    korea_peer_df,
+                    dart_financials_df,
+                    korea_market_df,
+                    selected_period=f"FY{dart_year}"
+                )
+
             st.session_state["dart_financials_df"] = dart_financials_df
             st.session_state["dart_logs_df"] = dart_logs_df
+            st.session_state["dart_valuation_df"] = dart_valuation_df
 
-            st.success("DART 재무데이터 수집 완료. 아래 Valuation 설정에서 바로 사용할 수 있습니다.")
+            st.success("DART 재무데이터 및 Multiple 산출 완료. 아래 Valuation 계산에도 바로 반영됩니다.")
 
     if "dart_logs_df" in st.session_state:
         st.write("수집 로그")
         st.dataframe(st.session_state["dart_logs_df"], use_container_width=True)
 
-    if "dart_financials_df" in st.session_state:
-        st.write("현재 반영 중인 DART 재무데이터")
+    if "dart_valuation_df" in st.session_state:
+        st.write("DART 기반 국내 Peer Valuation Table")
+
+        dart_display_cols = [
+            "Ticker",
+            "Company",
+            "Peer Group",
+            "Country",
+            "Category",
+            "Price",
+            "Currency",
+            "Market Cap_M",
+            "Net Debt_M",
+            "EV_M",
+            "Revenue_M",
+            "EBITDA_M",
+            "Net Income_M",
+            "EV/Revenue",
+            "EV/EBITDA",
+            "P/E",
+            "Market Data Updated At"
+        ]
+
+        existing_dart_cols = [
+            col for col in dart_display_cols
+            if col in st.session_state["dart_valuation_df"].columns
+        ]
+
         st.dataframe(
-            st.session_state["dart_financials_df"].style.format({
+            st.session_state["dart_valuation_df"][existing_dart_cols].style.format({
+                "Price": "{:,.2f}",
+                "Market Cap_M": "{:,.1f}",
+                "Net Debt_M": "{:,.1f}",
+                "EV_M": "{:,.1f}",
                 "Revenue_M": "{:,.1f}",
                 "EBITDA_M": "{:,.1f}",
                 "Net Income_M": "{:,.1f}",
-                "Net Debt_M": "{:,.1f}",
-                "Shares_M": "{:,.1f}"
+                "EV/Revenue": "{:,.1f}x",
+                "EV/EBITDA": "{:,.1f}x",
+                "P/E": "{:,.1f}x"
             }),
-            use_container_width=True
-        )
-
-        dart_csv = st.session_state["dart_financials_df"].to_csv(index=False).encode("utf-8-sig")
-
-        st.download_button(
-            label="📥 백업용 DART financials.csv 다운로드",
-            data=dart_csv,
-            file_name=f"financials_dart_{dart_year}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv"
+            use_container_width=True,
+            height=420
         )
 
 
