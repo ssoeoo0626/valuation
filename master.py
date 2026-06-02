@@ -207,13 +207,20 @@ def clean_amount(value):
 
 
 def pick_amount(fs_df, keywords, sj_div=None):
+    """
+    DART 계정명에서 금액을 찾는 함수.
+    sj_div는 "IS" 하나만 받을 수도 있고, ["IS", "CIS"]처럼 리스트로도 받을 수 있음.
+    """
     if fs_df.empty:
         return np.nan
 
     temp = fs_df.copy()
 
     if sj_div is not None and "sj_div" in temp.columns:
-        temp = temp[temp["sj_div"] == sj_div]
+        if isinstance(sj_div, list):
+            temp = temp[temp["sj_div"].isin(sj_div)]
+        else:
+            temp = temp[temp["sj_div"] == sj_div]
 
     if temp.empty:
         return np.nan
@@ -240,28 +247,48 @@ def safe_zero(value):
 def calculate_dart_metrics(fs_df):
     """
     DART 원 단위 → 백만원 단위 1자리 변환
-    EBITDA = 영업이익 + 감가상각비 + 무형자산상각비
-    Net Debt = 이자부부채 - 현금및현금성자산
+
+    Revenue_M = 연결 매출액
+    EBITDA_M = 영업이익 + 감가상각비 + 무형자산상각비
+    Net Income_M = 연결 당기순이익
+    Net Debt_M = 이자부부채 - 현금및현금성자산
     """
 
+    # 일부 회사는 손익계산서가 IS가 아니라 CIS로 들어와서 둘 다 탐색
     revenue = pick_amount(
         fs_df,
-        ["매출액", "수익(매출액)", "영업수익"],
-        sj_div="IS"
+        [
+            "매출액",
+            "수익(매출액)",
+            "영업수익",
+            "수익",
+            "매출"
+        ],
+        sj_div=["IS", "CIS"]
     )
 
     operating_income = pick_amount(
         fs_df,
-        ["영업이익", "영업손실"],
-        sj_div="IS"
+        [
+            "영업이익",
+            "영업손실"
+        ],
+        sj_div=["IS", "CIS"]
     )
 
     net_income = pick_amount(
         fs_df,
-        ["당기순이익", "당기순손실", "당기순손익"],
-        sj_div="IS"
+        [
+            "당기순이익",
+            "당기순손실",
+            "당기순손익",
+            "연결당기순이익",
+            "연결당기순손실"
+        ],
+        sj_div=["IS", "CIS"]
     )
 
+    # 감가상각비+무형자산상각비 통합 계정 우선 탐색
     depreciation_amortization = pick_amount(
         fs_df,
         [
@@ -274,8 +301,18 @@ def calculate_dart_metrics(fs_df):
     )
 
     if pd.isna(depreciation_amortization):
-        depreciation = pick_amount(fs_df, ["감가상각비"], sj_div="CF")
-        amortization = pick_amount(fs_df, ["무형자산상각비"], sj_div="CF")
+        depreciation = pick_amount(
+            fs_df,
+            ["감가상각비"],
+            sj_div="CF"
+        )
+
+        amortization = pick_amount(
+            fs_df,
+            ["무형자산상각비"],
+            sj_div="CF"
+        )
+
         depreciation_amortization = safe_zero(depreciation) + safe_zero(amortization)
 
     cash = pick_amount(
@@ -292,7 +329,12 @@ def calculate_dart_metrics(fs_df):
 
     current_long_debt = pick_amount(
         fs_df,
-        ["유동성장기부채", "유동성장기차입금", "유동성 장기차입금", "유동성사채"],
+        [
+            "유동성장기부채",
+            "유동성장기차입금",
+            "유동성 장기차입금",
+            "유동성사채"
+        ],
         sj_div="BS"
     )
 
@@ -310,13 +352,20 @@ def calculate_dart_metrics(fs_df):
 
     current_lease = pick_amount(
         fs_df,
-        ["유동리스부채", "유동성리스부채", "유동성 리스부채"],
+        [
+            "유동리스부채",
+            "유동성리스부채",
+            "유동성 리스부채"
+        ],
         sj_div="BS"
     )
 
     noncurrent_lease = pick_amount(
         fs_df,
-        ["비유동리스부채", "비유동 리스부채"],
+        [
+            "비유동리스부채",
+            "비유동 리스부채"
+        ],
         sj_div="BS"
     )
 
