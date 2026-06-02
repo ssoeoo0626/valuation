@@ -4,43 +4,36 @@ import numpy as np
 from datetime import datetime
 import yfinance as yf
 
+# -------------------------------------------------
+# 0. Page Setting
+# -------------------------------------------------
+
 st.set_page_config(
     page_title="Peer Valuation Tool",
     page_icon="📊",
     layout="wide"
 )
 
+st.title("📊 Peer Valuation Tool")
+st.caption("Peer Group별 시장가치 및 Multiple 자동 산출 Tool")
+
+
 # -------------------------------------------------
 # 1. 기본 설정
 # -------------------------------------------------
 
-st.title("📊 Peer Valuation Tool")
-st.caption("시장 데이터는 반실시간 업데이트, 재무 데이터는 기준일별 CSV 관리 방식")
-
-MARKET_DATA_TTL = 3600  # 1시간 캐시
+MARKET_DATA_TTL = 60 * 60 * 24  # 24시간 캐시
 
 
 # -------------------------------------------------
-# 2. 데이터 로드 함수
+# 2. 시장 데이터 호출
 # -------------------------------------------------
-
-@st.cache_data
-def load_peer_master(file):
-    df = pd.read_csv(file)
-    return df
-
-
-@st.cache_data
-def load_financials(file):
-    df = pd.read_csv(file)
-    return df
-
 
 @st.cache_data(ttl=MARKET_DATA_TTL)
 def get_market_data(tickers):
     """
-    주가 / 시가총액 등 시장 데이터만 반실시간으로 가져옴
-    ttl=3600 → 1시간마다 자동 갱신
+    yfinance에서 주가, 시가총액, 통화 데이터를 불러옴
+    24시간 캐시 적용
     """
     rows = []
 
@@ -50,11 +43,7 @@ def get_market_data(tickers):
             info = stock.info
             hist = stock.history(period="1d")
 
-            if hist.empty:
-                price = np.nan
-            else:
-                price = hist["Close"].iloc[-1]
-
+            price = hist["Close"].iloc[-1] if not hist.empty else np.nan
             market_cap = info.get("marketCap", np.nan)
             currency = info.get("currency", "")
             company_name = info.get("shortName", ticker)
@@ -89,7 +78,7 @@ def get_market_data(tickers):
 def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     """
     Peer Master + Financials + Market Data 결합
-    EV, EV/EBITDA, P/E, EV/Sales 계산
+    EV, EV/Revenue, EV/EBITDA, P/E 계산
     """
 
     financial_period = financial_df[financial_df["Period"] == selected_period].copy()
@@ -97,13 +86,11 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     df = peer_df.merge(financial_period, on="Ticker", how="left")
     df = df.merge(market_df, on="Ticker", how="left")
 
-    # 단위 정리
-    # Market Cap은 yfinance 기준 원 단위/달러 단위 그대로 들어올 수 있음
-    # 보기 편하게 백만 단위로 변환
+    # Market Cap은 yfinance에서 실제 단위로 들어옴 → 백만 단위로 변환
     df["Market Cap_M"] = df["Market Cap"] / 1_000_000
 
     # EV = Market Cap + Net Debt
-    # Net Debt_M은 CSV에서 백만 단위로 관리한다고 가정
+    # Net Debt_M은 사용자가 백만 단위로 입력한다고 가정
     df["EV_M"] = df["Market Cap_M"] + df["Net Debt_M"]
 
     # Multiple 계산
@@ -111,7 +98,7 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     df["EV/EBITDA"] = df["EV_M"] / df["EBITDA_M"]
     df["P/E"] = df["Market Cap_M"] / df["Net Income_M"]
 
-    # 비정상값 처리
+    # 무한대 값 제거
     multiple_cols = ["EV/Revenue", "EV/EBITDA", "P/E"]
     for col in multiple_cols:
         df[col] = df[col].replace([np.inf, -np.inf], np.nan)
@@ -121,9 +108,12 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
 
 def remove_outliers_iqr(df, col):
     """
-    IQR 방식 Outlier 제거
+    IQR 방식으로 Outlier 제거
     """
     clean_df = df.dropna(subset=[col]).copy()
+
+    if clean_df.empty:
+        return clean_df
 
     q1 = clean_df[col].quantile(0.25)
     q3 = clean_df[col].quantile(0.75)
@@ -135,95 +125,157 @@ def remove_outliers_iqr(df, col):
     return clean_df[(clean_df[col] >= lower) & (clean_df[col] <= upper)]
 
 
-def calculate_target_value(target_metric, selected_multiple):
-    return target_metric * selected_multiple
-
-
 # -------------------------------------------------
 # 4. Sidebar
 # -------------------------------------------------
 
 st.sidebar.header("⚙️ 설정")
 
-peer_file = st.sidebar.file_uploader(
-    "Peer Master CSV 업로드",
-    type=["csv"],
-    help="Ticker, Company, Peer Group, Country 등이 포함된 파일"
-)
-
-financial_file = st.sidebar.file_uploader(
-    "Financials CSV 업로드",
-    type=["csv"],
-    help="Ticker, Period, Revenue_M, EBITDA_M, Net Debt_M 등이 포함된 파일"
-)
-
-st.sidebar.divider()
-
 if st.sidebar.button("🔄 시장 데이터 강제 새로고침"):
     get_market_data.clear()
-    st.sidebar.success("시장 데이터 캐시를 초기화했습니다. 다시 계산하면 최신 데이터를 불러옵니다.")
+    st.sidebar.success("시장 데이터 캐시를 초기화했습니다.")
 
-st.sidebar.caption(f"시장 데이터 자동 갱신 주기: {MARKET_DATA_TTL // 60}분")
-
-
-# -------------------------------------------------
-# 5. Sample CSV 안내
-# -------------------------------------------------
-
-with st.expander("📌 CSV 양식 예시 보기"):
-    st.write("peer_master.csv")
-    st.code(
-        """Ticker,Company,Peer Group,Country
-IMAX,IMAX Corporation,PLF,US
-CNK,Cinemark Holdings,Exhibitor,US
-AMC,AMC Entertainment,Exhibitor,US
-DBO.TO,D-BOX Technologies,Motion Seat,Canada""",
-        language="csv"
-    )
-
-    st.write("financials.csv")
-    st.code(
-        """Ticker,Period,Revenue_M,EBITDA_M,Net Income_M,Net Debt_M,Shares_M
-IMAX,FY2025,352,120,52,120,55
-CNK,FY2025,3100,650,210,1800,122
-AMC,FY2025,4600,530,-220,4100,360
-DBO.TO,FY2025,38,7,2,5,80""",
-        language="csv"
-    )
+st.sidebar.caption("시장 데이터 자동 갱신 주기: 24시간")
+st.sidebar.caption("주가/시가총액은 yfinance 기준으로 불러옵니다.")
 
 
 # -------------------------------------------------
-# 6. 메인 로직
+# 5. 입력 데이터
 # -------------------------------------------------
 
-if peer_file is None or financial_file is None:
-    st.info("왼쪽 사이드바에서 Peer Master CSV와 Financials CSV를 업로드해줘.")
+st.subheader("0. 입력 데이터")
+
+st.info(
+    "Peer 회사와 재무 데이터를 직접 입력한 뒤, 아래의 'Valuation 계산하기' 버튼을 눌러줘. "
+    "Revenue, EBITDA, Net Income, Net Debt는 모두 백만 단위로 입력하면 됨."
+)
+
+default_peer_data = pd.DataFrame({
+    "Ticker": ["IMAX", "CNK", "AMC", "CGX.TO", "DBO.TO", "DLB"],
+    "Company": [
+        "IMAX Corporation",
+        "Cinemark Holdings",
+        "AMC Entertainment",
+        "Cineplex Inc.",
+        "D-BOX Technologies",
+        "Dolby Laboratories"
+    ],
+    "Peer Group": [
+        "PLF",
+        "Exhibitor",
+        "Exhibitor",
+        "Exhibitor",
+        "Motion Seat",
+        "Audio/PLF"
+    ],
+    "Country": [
+        "US",
+        "US",
+        "US",
+        "Canada",
+        "Canada",
+        "US"
+    ]
+})
+
+default_financial_data = pd.DataFrame({
+    "Ticker": ["IMAX", "CNK", "AMC", "CGX.TO", "DBO.TO", "DLB"],
+    "Period": ["FY2025", "FY2025", "FY2025", "FY2025", "FY2025", "FY2025"],
+    "Revenue_M": [410, 3100, 4600, 1050, 38, 1300],
+    "EBITDA_M": [140, 650, 530, 130, 7, 420],
+    "Net Income_M": [80, 210, -220, 20, 2, 300],
+    "Net Debt_M": [120, 1800, 4100, 850, 5, -500],
+    "Shares_M": [55, 122, 360, 64, 80, 95]
+})
+
+st.write("Peer Master 입력")
+peer_df = st.data_editor(
+    default_peer_data,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="peer_editor"
+)
+
+st.write("Financials 입력")
+financial_df = st.data_editor(
+    default_financial_data,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="financial_editor"
+)
+
+run_calculation = st.button("📊 Valuation 계산하기", type="primary")
+
+if not run_calculation:
     st.stop()
 
-peer_df = load_peer_master(peer_file)
-financial_df = load_financials(financial_file)
+
+# -------------------------------------------------
+# 6. 입력값 검증
+# -------------------------------------------------
 
 required_peer_cols = {"Ticker", "Company", "Peer Group", "Country"}
 required_financial_cols = {
-    "Ticker", "Period", "Revenue_M", "EBITDA_M",
-    "Net Income_M", "Net Debt_M", "Shares_M"
+    "Ticker",
+    "Period",
+    "Revenue_M",
+    "EBITDA_M",
+    "Net Income_M",
+    "Net Debt_M",
+    "Shares_M"
 }
 
 if not required_peer_cols.issubset(peer_df.columns):
-    st.error(f"Peer Master CSV에 필요한 컬럼이 부족합니다: {required_peer_cols}")
+    st.error(f"Peer Master에 필요한 컬럼이 부족합니다: {required_peer_cols}")
     st.stop()
 
 if not required_financial_cols.issubset(financial_df.columns):
-    st.error(f"Financials CSV에 필요한 컬럼이 부족합니다: {required_financial_cols}")
+    st.error(f"Financials에 필요한 컬럼이 부족합니다: {required_financial_cols}")
     st.stop()
+
+# 빈 티커 제거
+peer_df = peer_df.dropna(subset=["Ticker"]).copy()
+financial_df = financial_df.dropna(subset=["Ticker", "Period"]).copy()
+
+# 숫자 컬럼 변환
+numeric_cols = ["Revenue_M", "EBITDA_M", "Net Income_M", "Net Debt_M", "Shares_M"]
+
+for col in numeric_cols:
+    financial_df[col] = pd.to_numeric(financial_df[col], errors="coerce")
+
+if peer_df.empty:
+    st.error("Peer Master에 입력된 회사가 없습니다.")
+    st.stop()
+
+if financial_df.empty:
+    st.error("Financials에 입력된 재무 데이터가 없습니다.")
+    st.stop()
+
+
+# -------------------------------------------------
+# 7. 필터 설정
+# -------------------------------------------------
 
 available_periods = sorted(financial_df["Period"].dropna().unique())
 available_peer_groups = sorted(peer_df["Peer Group"].dropna().unique())
 
+if len(available_periods) == 0:
+    st.error("Financials의 Period 값이 없습니다.")
+    st.stop()
+
+if len(available_peer_groups) == 0:
+    st.error("Peer Group 값이 없습니다.")
+    st.stop()
+
+st.divider()
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    selected_period = st.selectbox("기준 실적 기간", available_periods, index=0)
+    selected_period = st.selectbox(
+        "기준 실적 기간",
+        available_periods
+    )
 
 with col2:
     selected_peer_groups = st.multiselect(
@@ -238,10 +290,20 @@ with col3:
         ["EV/EBITDA", "EV/Revenue", "P/E"]
     )
 
+if len(selected_peer_groups) == 0:
+    st.warning("Peer Group을 최소 1개 이상 선택해줘.")
+    st.stop()
+
+
+# -------------------------------------------------
+# 8. 시장 데이터 호출 및 Valuation 계산
+# -------------------------------------------------
+
 filtered_peer_df = peer_df[peer_df["Peer Group"].isin(selected_peer_groups)].copy()
 tickers = filtered_peer_df["Ticker"].dropna().unique().tolist()
 
-market_df = get_market_data(tickers)
+with st.spinner("시장 데이터를 불러오는 중입니다..."):
+    market_df = get_market_data(tickers)
 
 valuation_df = calculate_peer_valuation(
     filtered_peer_df,
@@ -250,19 +312,29 @@ valuation_df = calculate_peer_valuation(
     selected_period
 )
 
-st.divider()
 
 # -------------------------------------------------
-# 7. Peer Table
+# 9. Peer Valuation Table
 # -------------------------------------------------
 
 st.subheader("1. Peer Valuation Table")
 
 display_cols = [
-    "Ticker", "Company", "Peer Group", "Country",
-    "Price", "Currency", "Market Cap_M", "Net Debt_M", "EV_M",
-    "Revenue_M", "EBITDA_M", "Net Income_M",
-    "EV/Revenue", "EV/EBITDA", "P/E",
+    "Ticker",
+    "Company",
+    "Peer Group",
+    "Country",
+    "Price",
+    "Currency",
+    "Market Cap_M",
+    "Net Debt_M",
+    "EV_M",
+    "Revenue_M",
+    "EBITDA_M",
+    "Net Income_M",
+    "EV/Revenue",
+    "EV/EBITDA",
+    "P/E",
     "Market Data Updated At"
 ]
 
@@ -287,17 +359,20 @@ st.dataframe(
 
 
 # -------------------------------------------------
-# 8. Multiple Summary
+# 10. Peer Multiple Summary
 # -------------------------------------------------
 
 st.subheader("2. Peer Multiple Summary")
 
-use_outlier_filter = st.checkbox("Outlier 제거 적용", value=True)
+summary_option_col1, summary_option_col2 = st.columns(2)
+
+with summary_option_col1:
+    use_outlier_filter = st.checkbox("Outlier 제거 적용", value=True)
+
+with summary_option_col2:
+    exclude_negative = st.checkbox("음수 Multiple 제외", value=True)
 
 multiple_df = valuation_df.dropna(subset=[selected_multiple_type]).copy()
-
-# 음수 multiple 제거 옵션
-exclude_negative = st.checkbox("음수 Multiple 제외", value=True)
 
 if exclude_negative:
     multiple_df = multiple_df[multiple_df[selected_multiple_type] > 0]
@@ -306,6 +381,10 @@ if use_outlier_filter:
     multiple_df_for_summary = remove_outliers_iqr(multiple_df, selected_multiple_type)
 else:
     multiple_df_for_summary = multiple_df.copy()
+
+if multiple_df_for_summary.empty:
+    st.warning("Multiple 산정 가능한 Peer가 없습니다. EBITDA/Net Income/Revenue 입력값을 확인해줘.")
+    st.stop()
 
 avg_multiple = multiple_df_for_summary[selected_multiple_type].mean()
 median_multiple = multiple_df_for_summary[selected_multiple_type].median()
@@ -331,7 +410,7 @@ with st.expander("Multiple 산정 대상 Peer 보기"):
 
 
 # -------------------------------------------------
-# 9. Target Company Valuation
+# 11. Target Company Valuation
 # -------------------------------------------------
 
 st.subheader("3. Target Company Valuation")
@@ -339,7 +418,10 @@ st.subheader("3. Target Company Valuation")
 target_col1, target_col2, target_col3 = st.columns(3)
 
 with target_col1:
-    target_company_name = st.text_input("Target Company", value="Target Company")
+    target_company_name = st.text_input(
+        "Target Company",
+        value="Target Company"
+    )
 
 with target_col2:
     if selected_multiple_type == "EV/EBITDA":
@@ -367,16 +449,18 @@ with target_col3:
 
 if selected_basis == "Average":
     applied_multiple = avg_multiple
+
 elif selected_basis == "Median":
     applied_multiple = median_multiple
+
 else:
     applied_multiple = st.number_input(
         "Manual Multiple",
-        value=float(round(median_multiple, 1)) if not np.isnan(median_multiple) else 10.0,
+        value=float(round(median_multiple, 1)),
         step=0.5
     )
 
-target_value = calculate_target_value(target_metric, applied_multiple)
+target_value = target_metric * applied_multiple
 
 result_col1, result_col2, result_col3 = st.columns(3)
 
@@ -386,21 +470,28 @@ result_col3.metric("Implied Value", f"{target_value:,.1f}M")
 
 
 # -------------------------------------------------
-# 10. Sensitivity Table
+# 12. Sensitivity Table
 # -------------------------------------------------
 
 st.subheader("4. Sensitivity Table")
 
-sensitivity_range = st.slider(
-    "Multiple 민감도 범위",
-    min_value=0.5,
-    max_value=5.0,
-    value=2.0,
-    step=0.5,
-    help="적용 Multiple ± 범위"
-)
+sensitivity_col1, sensitivity_col2 = st.columns(2)
 
-step = st.selectbox("간격", [0.5, 1.0], index=0)
+with sensitivity_col1:
+    sensitivity_range = st.slider(
+        "Multiple 민감도 범위",
+        min_value=0.5,
+        max_value=5.0,
+        value=2.0,
+        step=0.5
+    )
+
+with sensitivity_col2:
+    step = st.selectbox(
+        "간격",
+        [0.5, 1.0],
+        index=0
+    )
 
 multiple_values = np.arange(
     max(applied_multiple - sensitivity_range, 0),
@@ -423,14 +514,12 @@ st.dataframe(
 
 
 # -------------------------------------------------
-# 11. 다운로드
+# 13. Export
 # -------------------------------------------------
 
 st.subheader("5. Export")
 
-export_df = valuation_df.copy()
-
-csv = export_df.to_csv(index=False).encode("utf-8-sig")
+csv = valuation_df.to_csv(index=False).encode("utf-8-sig")
 
 st.download_button(
     label="📥 Valuation Table CSV 다운로드",
