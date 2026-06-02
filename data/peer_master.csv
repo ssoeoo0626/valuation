@@ -1,16 +1,12 @@
-Ticker,Company,Peer Group,Country,Category
-IMAX,IMAX Corporation,PLF,US,Global PLF
-DBO.TO,D-BOX Technologies,Motion Seat,Canada,Global PLF
-DLB,Dolby Laboratories,Audio/PLF,US,Global PLF
-AMC,AMC Entertainment,Exhibitor,US,Global Exhibitor
-CNK,Cinemark Holdings,Exhibitor,US,Global Exhibitor
-CGX.TO,Cineplex Inc.,Exhibitor,Canada,Global Exhibitor
-206560.KQ,Dexter Studios,CG/VFX,Korea,Korea CG/VFX
-299900.KQ,WYSIWYG Studios,CG/VFX,Korea,Korea CG/VFX
-289220.KQ,Giantstep,CG/VFX & Realtime Content,Korea,Korea CG/VFX
-476080.KQ,M83,VFX,Korea,Korea CG/VFX
-389140.KQ,4BY4,Visual Tech / Post Production,Korea,Korea CG/VFX
-408900.KQ,Studio Mir,Animation / 3D CGI,Korea,Korea CG/VFX
-419530.KQ,SAMG Entertainment,Animation / IP,Korea,Korea CG/VFX
-291230.KQ,NP,XR / Virtual Production,Korea,Korea XR / Korea CG/VFX
-200350.KQ,RaemongRaein,Drama / Content Production,Korea,Korea CG/VFX
+Ticker,Company,Peer_Group,Country,Category
+IMAX,IMAX Corporation,Core PLF/Tech,USA,PLF/Immersive Tech
+DBO.TO,D-BOX Technologies Inc.,Core PLF/Tech,Canada,Motion PLF/Immersive Tech
+DLB,Dolby Laboratories Inc.,Core PLF/Tech,USA,PLF/Immersive Tech
+AMC,AMC Entertainment Holdings Inc.,Large Exhibitor,USA,Exhibitor
+CNK,Cinemark Holdings Inc.,Large Exhibitor,USA,Exhibitor
+CGX.TO,Cineplex Inc.,Large Exhibitor,Canada,Exhibitor
+KINE.BR,Kinepolis Group NV,Large Exhibitor,Belgium,Exhibitor
+MCS,The Marcus Corporation,Regional/Mid Exhibitor,USA,Exhibitor
+RDIB,Reading International Inc.,Regional/Mid Exhibitor,USA,Exhibitor
+EMAN.L,Everyman Media Group plc,Premium/Small Exhibitor,UK,Exhibitor
+MAJOR.BK,Major Cineplex Group Public Company Limited,Asia Exhibitor,Thailand,Exhibitor
