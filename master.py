@@ -715,31 +715,127 @@ if missing_peer_cols:
 
 
 # -------------------------------------------------
-# 11. DART 재무데이터 수집
+# 11. Valuation 설정
 # -------------------------------------------------
 
-st.subheader("0. DART 재무데이터 수집")
+st.subheader("1. Valuation 설정")
 
-dart_year = "2025"
-fetch_dart = st.button("📥 DART 재무데이터 가져오기", type="primary")
+available_periods = sorted(financial_df["Period"].dropna().unique())
 
-if fetch_dart:
-    if DART_API_KEY is None:
-        st.error("DART API Key가 없습니다. Streamlit Secrets에 DART_API_KEY를 먼저 등록해주세요.")
-    else:
-        korea_peer_df = get_korea_peer_df(default_peer_df)
-        if korea_peer_df.empty:
-            st.error("DART 수집 대상 국내 Peer가 없습니다. peer_master.csv의 Ticker에 .KQ 또는 .KS를 붙여주세요.")
-        else:
-            with st.spinner("DART 재무데이터를 수집하는 중입니다..."):
-                dart_financials_df, dart_logs_df = fetch_dart_financials_for_korea_peers(
-                    default_peer_df,
-                    DART_API_KEY,
-                    bsns_year=dart_year,
-                )
-            st.session_state["dart_financials_df"] = dart_financials_df
-            st.session_state["dart_logs_df"] = dart_logs_df
-            st.success("DART 재무데이터 수집 완료. 아래 Valuation 계산에 반영됩니다.")
+if len(available_periods) == 0:
+    st.warning("아직 Financials 데이터가 없습니다. DART 재무데이터를 가져오거나 financials.csv를 입력해주세요.")
+    st.stop()
+
+# 최초 진입 시 선택값 비워두기
+if "selected_peer_tickers" not in st.session_state:
+    st.session_state["selected_peer_tickers"] = []
+
+if "valuation_ready" not in st.session_state:
+    st.session_state["valuation_ready"] = False
+
+with st.form("peer_selection_form"):
+    col1, col2 = st.columns(2)
+
+    with col1:
+        selected_period = st.selectbox(
+            "기준 실적 기간",
+            available_periods,
+            key="selected_period_input"
+        )
+
+    with col2:
+        selected_multiple_type = st.selectbox(
+            "Multiple 기준",
+            ["EV/EBITDA", "EV/Revenue", "P/E"],
+            key="selected_multiple_type_input"
+        )
+
+    st.write("Peer 기업 선택")
+
+    peer_select_df = peer_df.copy()
+
+    # 기존 선택값 기준으로 체크 상태 복원
+    # 최초에는 selected_peer_tickers가 빈 리스트라 전부 미체크
+    peer_select_df["Use"] = peer_select_df["Ticker"].isin(
+        st.session_state["selected_peer_tickers"]
+    )
+
+    peer_select_display_cols = [
+        "Use",
+        "Ticker",
+        "Company",
+        "Peer Group",
+        "Country",
+        "Category"
+    ]
+
+    edited_peer_df = st.data_editor(
+        peer_select_df[peer_select_display_cols],
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Use": st.column_config.CheckboxColumn(
+                "선택",
+                help="Peer Multiple 산정에 포함할 기업을 체크하세요.",
+                default=False
+            )
+        },
+        disabled=[
+            "Ticker",
+            "Company",
+            "Peer Group",
+            "Country",
+            "Category"
+        ],
+        key="peer_selector_editor"
+    )
+
+    run_calculation = st.form_submit_button("📊 Valuation 계산하기", type="primary")
+
+if run_calculation:
+    selected_peer_tickers = edited_peer_df.loc[
+        edited_peer_df["Use"] == True,
+        "Ticker"
+    ].tolist()
+
+    st.session_state["selected_peer_tickers"] = selected_peer_tickers
+
+    filtered_peer_df = peer_df[
+        peer_df["Ticker"].isin(selected_peer_tickers)
+    ].copy()
+
+    if filtered_peer_df.empty:
+        st.warning("선택된 Peer가 없습니다.")
+        st.stop()
+
+    tickers = filtered_peer_df["Ticker"].dropna().unique().tolist()
+
+    with st.spinner("시장 데이터를 불러오는 중입니다..."):
+        market_df = get_market_data(tickers)
+
+    valuation_df = calculate_peer_valuation(
+        filtered_peer_df,
+        financial_df,
+        market_df,
+        selected_period
+    )
+
+    st.session_state["valuation_ready"] = True
+    st.session_state["valuation_df"] = valuation_df
+    st.session_state["selected_period_saved"] = selected_period
+    st.session_state["selected_multiple_type_saved"] = selected_multiple_type
+
+if not st.session_state["valuation_ready"]:
+    st.stop()
+
+valuation_df = st.session_state.get("valuation_df", pd.DataFrame())
+selected_period = st.session_state.get("selected_period_saved", selected_period)
+selected_multiple_type = st.session_state.get("selected_multiple_type_saved", selected_multiple_type)
+
+if valuation_df.empty:
+    st.warning("Valuation 계산 결과가 없습니다. Valuation 계산하기를 눌러주세요.")
+    st.stop()
 
 
 # -------------------------------------------------
