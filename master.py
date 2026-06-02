@@ -60,6 +60,13 @@ except Exception:
 # 2. 공통 정리 함수
 # -------------------------------------------------
 
+def get_file_mtime(path):
+    file_path = Path(path)
+    if file_path.exists():
+        return file_path.stat().st_mtime
+    return None
+
+
 def is_korea_ticker_series(ticker_series):
     ticker_series = ticker_series.fillna("").astype(str).str.strip()
     return ticker_series.str.endswith(".KQ") | ticker_series.str.endswith(".KS")
@@ -107,6 +114,8 @@ def normalize_peer_master(df):
     df.loc[is_korea & (df["Country"] == ""), "Country"] = "Korea"
     df.loc[is_korea & (df["Peer Group"] == ""), "Peer Group"] = "CG/VFX"
     df.loc[is_korea & (df["Category"] == ""), "Category"] = "Domestic Peer"
+
+    df = df[df["Ticker"] != ""].copy()
 
     return df[REQUIRED_PEER_COLS]
 
@@ -183,7 +192,7 @@ def get_non_korea_peer_df(peer_df):
 # -------------------------------------------------
 
 @st.cache_data
-def load_peer_master():
+def load_peer_master(file_mtime=None):
     try:
         peer_df = pd.read_csv(PEER_MASTER_PATH)
     except FileNotFoundError:
@@ -193,7 +202,7 @@ def load_peer_master():
 
 
 @st.cache_data
-def load_financials():
+def load_financials(file_mtime=None):
     try:
         financial_df = pd.read_csv(FINANCIALS_PATH)
     except FileNotFoundError:
@@ -609,6 +618,12 @@ def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     df = peer_df.merge(financial_period, on="Ticker", how="left")
     df = df.merge(market_df, on="Ticker", how="left")
 
+    if "Market Cap" not in df.columns:
+        df["Market Cap"] = np.nan
+
+    if "Net Debt_M" not in df.columns:
+        df["Net Debt_M"] = np.nan
+
     df["Market Cap_M"] = df["Market Cap"] / 1_000_000
     df["EV_M"] = df["Market Cap_M"] + df["Net Debt_M"]
 
@@ -701,8 +716,28 @@ st.sidebar.caption("시장 데이터 자동 갱신 주기: 24시간")
 # 8. 기본 DB 로드
 # -------------------------------------------------
 
-default_peer_df = load_peer_master()
-default_financial_df = load_financials()
+peer_master_mtime = get_file_mtime(PEER_MASTER_PATH)
+financials_mtime = get_file_mtime(FINANCIALS_PATH)
+
+default_peer_df = load_peer_master(peer_master_mtime)
+default_financial_df = load_financials(financials_mtime)
+
+st.sidebar.divider()
+st.sidebar.subheader("🔎 데이터 로드 확인")
+st.sidebar.write("현재 작업 폴더:", str(Path.cwd()))
+st.sidebar.write("읽는 master 경로:", str(Path(PEER_MASTER_PATH).resolve()))
+st.sidebar.write("읽는 financials 경로:", str(Path(FINANCIALS_PATH).resolve()))
+st.sidebar.write("Master row 수:", len(default_peer_df))
+st.sidebar.write("Financials row 수:", len(default_financial_df))
+
+with st.sidebar.expander("현재 로드된 Master 확인"):
+    if default_peer_df.empty:
+        st.write("로드된 master가 없습니다.")
+    else:
+        st.dataframe(
+            default_peer_df[["Ticker", "Company", "Peer Group", "Category"]],
+            use_container_width=True
+        )
 
 if default_peer_df.empty:
     st.error("data/peer_master.csv 파일이 없거나 비어 있습니다.")
