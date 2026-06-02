@@ -613,18 +613,75 @@ def fetch_dart_financials_for_korea_peers(peer_df, api_key, bsns_year="2025"):
 # -------------------------------------------------
 
 def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
-    financial_period = financial_df[financial_df["Period"] == selected_period].copy()
+    """
+    Peer + Financials + Market Data 병합
+
+    개선점:
+    - selected_period가 정확히 맞는 financials를 우선 사용
+    - 해당 period가 없는 ticker는 같은 ticker의 최신/마지막 financials로 fallback
+    - financials merge 여부를 Financial Match 컬럼으로 표시
+    - Net Debt가 없으면 EV는 비워두되, 원인 확인 가능
+    """
+
+    peer_df = peer_df.copy()
+    financial_df = financial_df.copy()
+    market_df = market_df.copy()
+
+    peer_df["Ticker"] = peer_df["Ticker"].astype(str).str.strip()
+    financial_df["Ticker"] = financial_df["Ticker"].astype(str).str.strip()
+    financial_df["Period"] = financial_df["Period"].astype(str).str.strip()
+    market_df["Ticker"] = market_df["Ticker"].astype(str).str.strip()
+
+    # 1) 선택 period financials
+    selected_financial = financial_df[
+        financial_df["Period"] == selected_period
+    ].copy()
+
+    selected_financial["Financial Match"] = "Selected Period"
+    selected_financial["Financial Period Used"] = selected_financial["Period"]
+
+    # 2) fallback financials: 선택 period가 없는 ticker는 financials.csv의 마지막 값 사용
+    fallback_financial = (
+        financial_df
+        .sort_values(["Ticker", "Period"])
+        .drop_duplicates(subset=["Ticker"], keep="last")
+        .copy()
+    )
+
+    fallback_financial["Financial Match"] = "Fallback Latest"
+    fallback_financial["Financial Period Used"] = fallback_financial["Period"]
+
+    selected_tickers = set(selected_financial["Ticker"].dropna().unique())
+    fallback_financial = fallback_financial[
+        ~fallback_financial["Ticker"].isin(selected_tickers)
+    ].copy()
+
+    financial_period = pd.concat(
+        [selected_financial, fallback_financial],
+        ignore_index=True
+    )
+
+    financial_period = financial_period.drop_duplicates(
+        subset=["Ticker"],
+        keep="first"
+    )
 
     df = peer_df.merge(financial_period, on="Ticker", how="left")
     df = df.merge(market_df, on="Ticker", how="left")
 
-    if "Market Cap" not in df.columns:
-        df["Market Cap"] = np.nan
+    # financials가 아예 안 붙은 경우 표시
+    df["Financial Match"] = df["Financial Match"].fillna("No Financials")
+    df["Financial Period Used"] = df["Financial Period Used"].fillna("")
 
-    if "Net Debt_M" not in df.columns:
-        df["Net Debt_M"] = np.nan
+    # 필요한 숫자 컬럼 방어
+    for col in ["Market Cap", "Revenue_M", "EBITDA_M", "Net Income_M", "Net Debt_M"]:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["Market Cap_M"] = df["Market Cap"] / 1_000_000
+
+    # Net Debt가 있어야 EV 계산
     df["EV_M"] = df["Market Cap_M"] + df["Net Debt_M"]
 
     df["EV/Revenue"] = df["EV_M"] / df["Revenue_M"]
@@ -1034,6 +1091,8 @@ display_cols = [
     "Peer Group",
     "Country",
     "Category",
+    "Financial Match",
+    "Financial Period Used",
     "Price",
     "Currency",
     "Market Cap_M",
