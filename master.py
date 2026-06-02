@@ -57,7 +57,7 @@ except Exception:
 
 
 # -------------------------------------------------
-# 2. 데이터 정리 함수
+# 2. 공통 정리 함수
 # -------------------------------------------------
 
 def is_korea_ticker_series(ticker_series):
@@ -69,11 +69,10 @@ def normalize_peer_master(df):
     """
     peer_master.csv 정리 함수
 
-    핵심:
     - master에 입력한 Peer Group / Category 값을 그대로 사용
     - 컬럼명만 표준화
-    - 국내 티커(.KS/.KQ)라도 Category를 강제로 덮어쓰지 않음
-    - 단, 국내 티커인데 Country / Peer Group / Category가 비어 있으면 기본값만 채움
+    - 국내 티커(.KS/.KQ)도 Category를 강제로 덮어쓰지 않음
+    - 단, 국내 티커인데 값이 비어 있으면 기본값만 채움
     """
 
     df = df.copy()
@@ -113,6 +112,13 @@ def normalize_peer_master(df):
 
 
 def normalize_financials(df):
+    """
+    financials.csv 정리 함수
+
+    필요한 컬럼:
+    Ticker, Period, Revenue_M, EBITDA_M, Net Income_M, Net Debt_M, Shares_M
+    """
+
     df = df.copy()
 
     rename_map = {
@@ -160,6 +166,16 @@ def normalize_financials(df):
     df = df[df["Period"] != ""]
 
     return df
+
+
+def get_korea_peer_df(peer_df):
+    peer_df = normalize_peer_master(peer_df)
+    return peer_df[is_korea_ticker_series(peer_df["Ticker"])].copy()
+
+
+def get_non_korea_peer_df(peer_df):
+    peer_df = normalize_peer_master(peer_df)
+    return peer_df[~is_korea_ticker_series(peer_df["Ticker"])].copy()
 
 
 # -------------------------------------------------
@@ -323,11 +339,6 @@ def clean_amount(value):
 
 
 def pick_amount(fs_df, keywords, sj_div=None):
-    """
-    DART 계정명에서 금액을 찾는 함수.
-    sj_div는 "IS" 하나만 받을 수도 있고, ["IS", "CIS"]처럼 리스트로도 받을 수 있음.
-    """
-
     if fs_df.empty:
         return np.nan
 
@@ -371,7 +382,7 @@ def calculate_dart_metrics(fs_df):
     Net Debt_M = 이자부부채 - 현금및현금성자산
 
     주의:
-    - 회사별 계정명이 달라 일부 항목은 수동 검증 필요
+    - DART 계정명은 회사마다 달라 일부 항목은 수동 검증 필요
     - 현재 Net Debt에는 리스부채 포함
     """
 
@@ -512,18 +523,28 @@ def calculate_dart_metrics(fs_df):
     }
 
 
-def get_korea_peer_df(peer_df):
-    korea_df = peer_df[is_korea_ticker_series(peer_df["Ticker"])].copy()
-    korea_df = normalize_peer_master(korea_df)
-    return korea_df
-
-
 def fetch_dart_financials_for_korea_peers(peer_df, api_key, bsns_year="2025"):
+    """
+    DART는 국내 .KS / .KQ 티커만 수집.
+    해외 Peer는 SKIP 로그로 남김.
+    """
+
     corp_df = get_dart_corp_code(api_key)
+
+    peer_df = normalize_peer_master(peer_df)
     korea_df = get_korea_peer_df(peer_df)
+    non_korea_df = get_non_korea_peer_df(peer_df)
 
     rows = []
     logs = []
+
+    for _, row in non_korea_df.iterrows():
+        logs.append({
+            "Ticker": row["Ticker"],
+            "Company": row.get("Company", ""),
+            "Status": "SKIP",
+            "Message": "DART 제외: 해외/비국내 티커. 재무값은 financials.csv에 입력 필요"
+        })
 
     for _, row in korea_df.iterrows():
         ticker = row["Ticker"]
@@ -572,7 +593,7 @@ def fetch_dart_financials_for_korea_peers(peer_df, api_key, bsns_year="2025"):
             "Ticker": ticker,
             "Company": company,
             "Status": "SUCCESS",
-            "Message": "수집 완료"
+            "Message": "DART 수집 완료"
         })
 
     return pd.DataFrame(rows), pd.DataFrame(logs)
@@ -631,13 +652,12 @@ def style_valuation_table(df):
         "P/E": "{:,.1f}x"
     }
 
-    existing_format_dict = {
-        col: fmt
-        for col, fmt in format_dict.items()
+    existing_format = {
+        col: fmt for col, fmt in format_dict.items()
         if col in df.columns
     }
 
-    return df.style.format(existing_format_dict)
+    return df.style.format(existing_format)
 
 
 # -------------------------------------------------
@@ -654,6 +674,7 @@ else:
 if st.sidebar.button("🔄 시장 데이터 강제 새로고침"):
     get_market_data.clear()
     st.sidebar.success("시장 데이터 캐시를 초기화했습니다.")
+    st.rerun()
 
 if st.sidebar.button("🔄 Master / Financials 새로고침"):
     load_peer_master.clear()
@@ -671,6 +692,7 @@ if st.sidebar.button("🧹 DART 수집값 초기화"):
     st.session_state.pop("dart_logs_df", None)
     st.session_state.pop("dart_valuation_df", None)
     st.sidebar.success("DART 수집값을 초기화했습니다.")
+    st.rerun()
 
 st.sidebar.caption("시장 데이터 자동 갱신 주기: 24시간")
 
@@ -702,16 +724,25 @@ st.subheader("0. DART 국내 Peer 재무데이터 / Multiple 자동 산출")
 with st.expander("DART 수집 설정 / 실행", expanded=True):
     dart_year = st.text_input("사업연도", value="2025")
 
+    all_peer_preview = normalize_peer_master(default_peer_df)
+    korea_peer_preview = get_korea_peer_df(default_peer_df)
+    non_korea_peer_preview = get_non_korea_peer_df(default_peer_df)
+
     st.caption(
-        "국내 상장 Peer(.KQ / .KS)의 연결 재무제표를 DART에서 수집하고, "
-        "yfinance 시총을 결합해 EV/Revenue, EV/EBITDA, P/E까지 계산합니다. "
-        "Peer Group / Category는 peer_master.csv 값을 그대로 사용합니다."
+        "DART는 국내 상장 Peer(.KQ / .KS)만 자동 수집합니다. "
+        "해외 Peer는 yfinance 시장데이터는 가져오되, 재무값은 financials.csv에 직접 입력해야 합니다."
     )
 
-    korea_peer_preview = get_korea_peer_df(default_peer_df)
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("전체 Peer", f"{len(all_peer_preview):,}개")
+    col_b.metric("DART 수집 가능 국내 Peer", f"{len(korea_peer_preview):,}개")
+    col_c.metric("DART 제외 해외 Peer", f"{len(non_korea_peer_preview):,}개")
 
-    st.write("DART 수집 대상 국내 Peer")
+    st.write("DART 수집 대상 국내 Peer (.KS / .KQ)")
     st.dataframe(korea_peer_preview, use_container_width=True, height=180)
+
+    with st.expander("DART 제외 해외 Peer 보기"):
+        st.dataframe(non_korea_peer_preview, use_container_width=True, height=220)
 
     fetch_dart = st.button("📥 DART 재무데이터 + Multiple 가져오기", type="primary")
 
