@@ -518,6 +518,152 @@ def fetch_dart_financials_for_korea_peers(peer_df, api_key, bsns_year="2025"):
 # 6. Valuation 계산 함수
 # -------------------------------------------------
 
+def get_latest_yfinance_financials(ticker):
+    """
+    해외/비DART 상장사 Target용 yfinance 재무 자동 수집
+    단위: M, 통화는 yfinance 기준 local currency
+    """
+
+    stock = yf.Ticker(ticker)
+
+    info = stock.info
+    income_stmt = stock.financials
+    balance_sheet = stock.balance_sheet
+    cashflow = stock.cashflow
+    hist = stock.history(period="1d")
+
+    price = hist["Close"].iloc[-1] if not hist.empty else np.nan
+    market_cap = info.get("marketCap", np.nan)
+    currency = info.get("currency", "")
+    company_name = info.get("shortName", ticker)
+
+    def pick_from_df(df, possible_names):
+        if df is None or df.empty:
+            return np.nan
+
+        for name in possible_names:
+            if name in df.index:
+                value = df.loc[name].dropna()
+                if not value.empty:
+                    return float(value.iloc[0])
+
+        return np.nan
+
+    revenue = pick_from_df(
+        income_stmt,
+        ["Total Revenue", "Operating Revenue", "Revenue"]
+    )
+
+    ebitda = pick_from_df(
+        income_stmt,
+        ["EBITDA", "Normalized EBITDA"]
+    )
+
+    net_income = pick_from_df(
+        income_stmt,
+        ["Net Income", "Net Income Common Stockholders"]
+    )
+
+    cash = pick_from_df(
+        balance_sheet,
+        ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"]
+    )
+
+    total_debt = pick_from_df(
+        balance_sheet,
+        ["Total Debt"]
+    )
+
+    if pd.isna(total_debt):
+        short_debt = pick_from_df(
+            balance_sheet,
+            ["Current Debt", "Current Debt And Capital Lease Obligation"]
+        )
+
+        long_debt = pick_from_df(
+            balance_sheet,
+            ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"]
+        )
+
+        total_debt = safe_zero(short_debt) + safe_zero(long_debt)
+
+    net_debt = safe_zero(total_debt) - safe_zero(cash)
+
+    return {
+        "Ticker": ticker,
+        "Company": company_name,
+        "Currency": currency,
+        "Price": price,
+        "Market Cap_M": market_cap / 1_000_000 if pd.notna(market_cap) else np.nan,
+        "Revenue_M": revenue / 1_000_000 if pd.notna(revenue) else np.nan,
+        "EBITDA_M": ebitda / 1_000_000 if pd.notna(ebitda) else np.nan,
+        "Net Income_M": net_income / 1_000_000 if pd.notna(net_income) else np.nan,
+        "Net Debt_M": net_debt / 1_000_000 if pd.notna(net_debt) else np.nan,
+        "Source": "yfinance"
+    }
+
+
+def get_target_company_financials(ticker, api_key=None, bsns_year="2025"):
+    """
+    Target Company 자동 재무 수집
+
+    - .KS / .KQ: DART
+    - 그 외: yfinance
+    """
+
+    ticker = str(ticker).strip()
+
+    if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+        if api_key is None:
+            raise ValueError("DART API Key가 없습니다.")
+
+        corp_df = get_dart_corp_code(api_key)
+        corp_code = find_corp_code(corp_df, ticker)
+
+        if corp_code is None:
+            raise ValueError("DART corp_code를 찾지 못했습니다.")
+
+        fs_df, error_msg = get_dart_financial_statement(
+            api_key=api_key,
+            corp_code=corp_code,
+            bsns_year=bsns_year,
+            reprt_code="11011"
+        )
+
+        if error_msg:
+            raise ValueError(error_msg)
+
+        metrics = calculate_dart_metrics(fs_df)
+
+        market_df = get_market_data([ticker])
+
+        price = np.nan
+        market_cap_m = np.nan
+        currency = "KRW"
+        company_name = ticker
+
+        if not market_df.empty:
+            price = market_df.iloc[0].get("Price", np.nan)
+            market_cap = market_df.iloc[0].get("Market Cap", np.nan)
+            market_cap_m = market_cap / 1_000_000 if pd.notna(market_cap) else np.nan
+            currency = market_df.iloc[0].get("Currency", "KRW")
+            company_name = market_df.iloc[0].get("Company Name", ticker)
+
+        return {
+            "Ticker": ticker,
+            "Company": company_name,
+            "Currency": currency,
+            "Price": price,
+            "Market Cap_M": market_cap_m,
+            "Revenue_M": metrics["Revenue_M"],
+            "EBITDA_M": metrics["EBITDA_M"],
+            "Net Income_M": metrics["Net Income_M"],
+            "Net Debt_M": metrics["Net Debt_M"],
+            "Source": "DART"
+        }
+
+    return get_latest_yfinance_financials(ticker)
+    
 def calculate_peer_valuation(peer_df, financial_df, market_df, selected_period):
     peer_df = peer_df.copy()
     financial_df = financial_df.copy()
@@ -891,53 +1037,151 @@ with st.expander("Multiple 산정 대상 Peer 보기"):
 
 st.subheader("4. Target Company Valuation")
 
-target_col1, target_col2, target_col3 = st.columns(3)
+with st.form("target_company_form"):
+    target_col1, target_col2, target_col3 = st.columns(3)
 
-with target_col1:
-    target_company_name = st.text_input("Target Company", value="Target Company")
+    with target_col1:
+        target_ticker = st.text_input(
+            "Target Ticker",
+            value=st.session_state.get("target_ticker", ""),
+            placeholder="예: 299900.KQ / IMAX / DLB"
+        )
 
-with target_col2:
-    if selected_multiple_type == "EV/EBITDA":
-        target_metric_name = "Target EBITDA_M"
-        default_metric = 100.0
-    elif selected_multiple_type == "EV/Revenue":
-        target_metric_name = "Target Revenue_M"
-        default_metric = 300.0
+    with target_col2:
+        target_year = st.text_input(
+            "Target 사업연도",
+            value=st.session_state.get("target_year", "2025")
+        )
+
+    with target_col3:
+        selected_basis = st.radio(
+            "적용 Multiple",
+            ["Average", "Median", "Manual"],
+            index=["Average", "Median", "Manual"].index(
+                st.session_state.get("selected_basis", "Median")
+            ),
+            horizontal=True
+        )
+
+    manual_multiple = None
+
+    if selected_basis == "Manual":
+        manual_multiple = st.number_input(
+            "Manual Multiple",
+            value=float(st.session_state.get("manual_multiple", round(median_multiple, 1))),
+            step=0.5
+        )
+
+    fetch_target = st.form_submit_button("Target 자동 분석")
+
+if fetch_target:
+    if target_ticker.strip() == "":
+        st.warning("Target Ticker를 입력해주세요.")
     else:
-        target_metric_name = "Target Net Income_M"
-        default_metric = 50.0
+        try:
+            with st.spinner("Target Company 재무/시장 데이터를 가져오는 중입니다..."):
+                target_data = get_target_company_financials(
+                    target_ticker,
+                    api_key=DART_API_KEY,
+                    bsns_year=target_year
+                )
 
-    target_metric = st.number_input(
-        target_metric_name,
-        value=default_metric,
-        step=10.0
+            st.session_state["target_ticker"] = target_ticker
+            st.session_state["target_year"] = target_year
+            st.session_state["selected_basis"] = selected_basis
+            st.session_state["target_data"] = target_data
+
+            if manual_multiple is not None:
+                st.session_state["manual_multiple"] = manual_multiple
+
+            st.success("Target Company 분석 완료")
+
+        except Exception as e:
+            st.error(f"Target Company 데이터를 가져오지 못했습니다: {e}")
+
+target_data = st.session_state.get("target_data", None)
+
+if target_data is not None:
+    if selected_basis == "Average":
+        applied_multiple = avg_multiple
+    elif selected_basis == "Median":
+        applied_multiple = median_multiple
+    else:
+        applied_multiple = st.session_state.get("manual_multiple", median_multiple)
+
+    if selected_multiple_type == "EV/EBITDA":
+        target_metric_name = "EBITDA_M"
+        target_metric = target_data.get("EBITDA_M", np.nan)
+        implied_ev = target_metric * applied_multiple if pd.notna(target_metric) else np.nan
+        implied_equity = implied_ev - target_data.get("Net Debt_M", np.nan) if pd.notna(implied_ev) else np.nan
+
+    elif selected_multiple_type == "EV/Revenue":
+        target_metric_name = "Revenue_M"
+        target_metric = target_data.get("Revenue_M", np.nan)
+        implied_ev = target_metric * applied_multiple if pd.notna(target_metric) else np.nan
+        implied_equity = implied_ev - target_data.get("Net Debt_M", np.nan) if pd.notna(implied_ev) else np.nan
+
+    else:
+        target_metric_name = "Net Income_M"
+        target_metric = target_data.get("Net Income_M", np.nan)
+        implied_ev = np.nan
+        implied_equity = target_metric * applied_multiple if pd.notna(target_metric) else np.nan
+
+    st.write("Target Company 요약")
+
+    target_summary_df = pd.DataFrame([{
+        "Ticker": target_data.get("Ticker"),
+        "Company": target_data.get("Company"),
+        "Source": target_data.get("Source"),
+        "Currency": target_data.get("Currency"),
+        "Price": target_data.get("Price"),
+        "Market Cap_M": target_data.get("Market Cap_M"),
+        "Revenue_M": target_data.get("Revenue_M"),
+        "EBITDA_M": target_data.get("EBITDA_M"),
+        "Net Income_M": target_data.get("Net Income_M"),
+        "Net Debt_M": target_data.get("Net Debt_M"),
+        "Selected Multiple": selected_multiple_type,
+        "Applied Multiple": applied_multiple,
+        "Target Metric": target_metric_name,
+        "Target Metric Value_M": target_metric,
+        "Implied EV_M": implied_ev,
+        "Implied Equity Value_M": implied_equity
+    }])
+
+    st.dataframe(
+        target_summary_df.style.format({
+            "Price": "{:,.2f}",
+            "Market Cap_M": "{:,.1f}",
+            "Revenue_M": "{:,.1f}",
+            "EBITDA_M": "{:,.1f}",
+            "Net Income_M": "{:,.1f}",
+            "Net Debt_M": "{:,.1f}",
+            "Applied Multiple": "{:,.1f}x",
+            "Target Metric Value_M": "{:,.1f}",
+            "Implied EV_M": "{:,.1f}",
+            "Implied Equity Value_M": "{:,.1f}"
+        }),
+        use_container_width=True
     )
 
-with target_col3:
-    selected_basis = st.radio(
-        "적용 Multiple",
-        ["Average", "Median", "Manual"],
-        horizontal=True
-    )
+    result_col1, result_col2, result_col3, result_col4 = st.columns(4)
 
-if selected_basis == "Average":
-    applied_multiple = avg_multiple
-elif selected_basis == "Median":
-    applied_multiple = median_multiple
-else:
-    applied_multiple = st.number_input(
-        "Manual Multiple",
-        value=float(round(median_multiple, 1)),
-        step=0.5
-    )
+    result_col1.metric("적용 Multiple", f"{applied_multiple:,.1f}x")
 
-target_value = target_metric * applied_multiple
+    if pd.notna(target_metric):
+        result_col2.metric(target_metric_name, f"{target_metric:,.1f}M")
+    else:
+        result_col2.metric(target_metric_name, "N/A")
 
-result_col1, result_col2, result_col3 = st.columns(3)
+    if pd.notna(implied_ev):
+        result_col3.metric("Implied EV", f"{implied_ev:,.1f}M")
+    else:
+        result_col3.metric("Implied EV", "N/A")
 
-result_col1.metric("적용 Multiple", f"{applied_multiple:,.1f}x")
-result_col2.metric("Target Metric", f"{target_metric:,.1f}M")
-result_col3.metric("Implied Value", f"{target_value:,.1f}M")
+    if pd.notna(implied_equity):
+        result_col4.metric("Implied Equity", f"{implied_equity:,.1f}M")
+    else:
+        result_col4.metric("Implied Equity", "N/A")
 
 
 # -------------------------------------------------
@@ -960,16 +1204,6 @@ with sensitivity_col1:
 with sensitivity_col2:
     step = st.selectbox("간격", [0.5, 1.0], index=0)
 
-multiple_values = np.arange(
-    max(applied_multiple - sensitivity_range, 0),
-    applied_multiple + sensitivity_range + step,
-    step
-)
-
-sensitivity_df = pd.DataFrame({
-    "Multiple": multiple_values,
-    "Implied Value_M": multiple_values * target_metric
-})
 
 st.dataframe(
     sensitivity_df.style.format({
@@ -978,7 +1212,32 @@ st.dataframe(
     }),
     use_container_width=True
 )
+target_metric_for_sensitivity = np.nan
 
+if "target_data" in st.session_state:
+    target_data = st.session_state["target_data"]
+
+    if selected_multiple_type == "EV/EBITDA":
+        target_metric_for_sensitivity = target_data.get("EBITDA_M", np.nan)
+    elif selected_multiple_type == "EV/Revenue":
+        target_metric_for_sensitivity = target_data.get("Revenue_M", np.nan)
+    else:
+        target_metric_for_sensitivity = target_data.get("Net Income_M", np.nan)
+
+if pd.isna(target_metric_for_sensitivity):
+    st.warning("Sensitivity Table을 계산하려면 Target Company 자동 분석을 먼저 실행해주세요.")
+    st.stop()
+
+multiple_values = np.arange(
+    max(applied_multiple - sensitivity_range, 0),
+    applied_multiple + sensitivity_range + step,
+    step
+)
+
+sensitivity_df = pd.DataFrame({
+    "Multiple": multiple_values,
+    "Implied Value_M": multiple_values * target_metric_for_sensitivity
+})
 
 # -------------------------------------------------
 # 16. Export
